@@ -1,0 +1,83 @@
+# TEDDYWHERE
+
+import sys
+import json
+import pyspark
+from pyspark.sql.functions import col, collect_list, collect_set , array_join
+
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+
+
+##### IMPORTO IL DATASET
+tedx_dataset_path = "Il path del vostro dataset"
+
+###### LEGGO I PARAMETRI
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+
+##### AVVIO IL JOB
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+#### CREO UN INPUT DATASET
+tedx_dataset = spark.read \
+    .option("header","true") \
+    .option("quote", "\"") \
+    .option("escape", "\"") \
+    .csv(tedx_dataset_path)
+    
+tedx_dataset.printSchema()
+
+#### FILTRO GLI ELEMENTI NULLI
+count_items = tedx_dataset.count()
+count_items_null = tedx_dataset.filter("idx is not null").count()
+
+print(f"Number of items from RAW DATA {count_items}")
+print(f"Number of items from RAW DATA with NOT NULL KEY {count_items_null}")
+
+## IMPORTO I TAG
+tags_dataset_path = "Il path del vostro dataset di tag"
+tags_dataset = spark.read.option("header","true").csv(tags_dataset_path)
+
+# AGGIUNGO I TAG AL DATASET
+tags_dataset_agg = tags_dataset.groupBy(col("idx").alias("idx_tag")).agg(collect_list("tag").alias("tags"))
+tags_dataset_agg.printSchema()
+
+## IMPORTO WATCHNEXT
+wn_dataset_path = "Il path del vostro dataset watchnext"
+wn_dataset = spark.read.option("header","true").csv(wn_dataset_path).filter("url LIKE 'https://www.ted.com/talks/%'")
+
+# AGGIUNGO WATCHNEXT AL DATASET
+wn_dataset_agg = wn_dataset.groupBy(col("idx").alias("idx_wn")).agg(collect_set("url").alias("watch_next"))
+wn_dataset_agg.printSchema()
+
+
+#JOIN TAG E WATCH NEXT
+tedx_dataset_agg = tedx_dataset.join(tags_dataset_agg, tedx_dataset.idx == tags_dataset_agg.idx_tag, "left") \
+    .join(wn_dataset_agg, tedx_dataset.idx == wn_dataset_agg.idx_wn, "left") \
+    .drop("idx_tag") \
+    .select(col("idx").alias("_id"), col("*")) \
+    .drop("idx_wn")\
+    .drop("idx")
+
+tedx_dataset_agg.printSchema()
+
+mongo_uri ="l'uri del vostro mongodb"
+write_mongo_options = {
+    "uri": mongo_uri,
+    "database": "unibg_tedx_2021",
+    "collection": "tedx_data",
+    "username": "username del vostro db su mongodb",
+    "password": "password del vostro db su mongodb",
+    "ssl": "true",
+    "ssl.domain_match": "false"}
+from awsglue.dynamicframe import DynamicFrame
+tedx_dataset_dynamic_frame = DynamicFrame.fromDF(tedx_dataset_agg, glueContext, "nested")
+
+glueContext.write_dynamic_frame.from_options(tedx_dataset_dynamic_frame, connection_type="mongodb", connection_options=write_mongo_options)
